@@ -4,6 +4,7 @@
 #include <RadioLib.h>
 #include <NimBLEDevice.h>
 #include <LittleFS.h>
+#include <SSD1306Wire.h>
 #include "common.h"
 #include "secrets.h"
 
@@ -16,10 +17,22 @@
 #define LORA_RST    12
 #define LORA_BUSY   13
 
+// OLED Pins
+#define OLED_SDA    17
+#define OLED_SCL    18
+#define OLED_RST    21
+
 // ---------------------------
 // Globals & Objects
 // ---------------------------
+SSD1306Wire display(0x3c, OLED_SDA, OLED_SCL);
 SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
+
+// Status Globals for Display
+String statusLine = "Initializing...";
+String lastPacketInfo = "No Data";
+String wifiStatusStr = "WiFi: Connecting...";
+int lastRssi = 0;
 
 // Interrupt Flag
 volatile bool packetReceived = false;
@@ -34,7 +47,7 @@ struct CacheEntry {
     uint8_t messageID;
     unsigned long timestamp;
 };
-#define CACHE_SIZE 20
+#define CACHE_SIZE 64
 CacheEntry recentMessages[CACHE_SIZE];
 int cacheHead = 0;
 uint8_t nextGatewayMessageID = 0; // For gateway generated packets
@@ -240,6 +253,30 @@ void cleanupOldHistory(uint32_t maxAgeSeconds) {
 // Helper Functions
 // ---------------------------
 
+void updateDisplay() {
+    display.clear();
+    
+    // Top Bar: WiFi Status
+    display.setFont(ArialMT_Plain_10);
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.drawString(0, 0, wifiStatusStr);
+    
+    // Middle: Last Packet
+    display.drawString(0, 15, "Last Packet:");
+    display.setFont(ArialMT_Plain_16);
+    display.drawString(0, 28, lastPacketInfo);
+    
+    // Bottom: RSSI and Status
+    display.setFont(ArialMT_Plain_10);
+    String rssiStr = "RSSI: " + String(lastRssi) + " dBm";
+    display.drawString(0, 50, rssiStr);
+    
+    display.setTextAlignment(TEXT_ALIGN_RIGHT);
+    display.drawString(128, 50, statusLine);
+    
+    display.display();
+}
+
 // Check if message has been seen recently
 bool isMessageSeen(uint32_t deviceID, uint8_t messageID) {
     for (int i = 0; i < CACHE_SIZE; i++) {
@@ -273,12 +310,19 @@ void broadcastCommand(uint8_t packetType, void* payload, size_t size) {
         memcpy(buffer + sizeof(PacketHeader), payload, size);
     }
     
-    Serial.printf("Broadcasting Command Type 0x%X\n", packetType);
+    Serial.printf("Broadcasting Packet Type 0x%X\n", packetType);
     radio.transmit(buffer, totalSize);
     delete[] buffer;
     
     // Switch back to RX mode
     radio.startReceive(); 
+}
+
+void sendAck(uint32_t targetDeviceID, uint8_t targetMessageID) {
+    AckPayload ack;
+    ack.ackDeviceID = targetDeviceID;
+    ack.ackMessageID = targetMessageID;
+    broadcastCommand(PACKET_TYPE_ACK, &ack, sizeof(AckPayload));
 }
 
 void uploadToTraccar(PacketHeader* header, LocationPayload* payload) {
@@ -308,14 +352,33 @@ void uploadToTraccar(PacketHeader* header, LocationPayload* payload) {
              int idx = response.indexOf("CONFIG_UUID:");
              if (idx >= 0) {
                  String uuidStr = response.substring(idx + 12);
-                 // Simple parsing of 32 hex chars (16 bytes)
-                 ConfigPayload config;
-                 config.count = 1;
-                 // Parse hex string to uuids[0]
-                 // ... Implementation details for hex parsing ...
-                 // For now, assuming fixed format and broadcasting dummy or parsed
-                 Serial.println("Received CONFIG_UUID command, broadcasting...");
-                 broadcastCommand(PACKET_TYPE_CONFIG_UPDATE, &config, sizeof(ConfigPayload));
+                 uuidStr.trim(); // Remove any whitespace
+                 
+                 if (uuidStr.length() >= 32) {
+                     ConfigPayload config;
+                     config.count = 1;
+                     
+                     // Parse hex string to uuids[0]
+                     bool parseSuccess = true;
+                     for (int i = 0; i < 16; i++) {
+                         String byteStr = uuidStr.substring(i * 2, i * 2 + 2);
+                         char* endPtr;
+                         long val = strtol(byteStr.c_str(), &endPtr, 16);
+                         if (*endPtr != 0) {
+                             Serial.println("Error parsing UUID hex string");
+                             parseSuccess = false;
+                             break;
+                         }
+                         config.uuids[0][i] = (uint8_t)val;
+                     }
+                     
+                     if (parseSuccess) {
+                         Serial.println("Received CONFIG_UUID command, broadcasting...");
+                         broadcastCommand(PACKET_TYPE_CONFIG_UPDATE, &config, sizeof(ConfigPayload));
+                     }
+                 } else {
+                     Serial.println("Invalid UUID string length");
+                 }
              }
         }
     } else {
@@ -348,8 +411,24 @@ void retransmitPacket(uint8_t* data, size_t len) {
 // ---------------------------
 void setup() {
     Serial.begin(115200);
+    
+    // OLED Reset & Init
+    pinMode(OLED_RST, OUTPUT);
+    digitalWrite(OLED_RST, LOW);
+    delay(20);
+    digitalWrite(OLED_RST, HIGH);
+    
+    display.init();
+    display.flipScreenVertically();
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(0, 0, "Booting Gateway...");
+    display.display();
+    
     delay(2000);
     Serial.println("Booting Gateway...");
+
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, LOW);
 
     // 1. Radio Setup
     Serial.print(F("[SX1262] Initializing ... "));
@@ -359,7 +438,12 @@ void setup() {
     } else {
         Serial.print(F("failed, code "));
         Serial.println(state);
-        while (true);
+        while (true) {
+             digitalWrite(LED_BUILTIN, HIGH);
+             delay(100);
+             digitalWrite(LED_BUILTIN, LOW);
+             delay(100);
+        }
     }
 
     // 2. Initialize Location History
@@ -368,6 +452,8 @@ void setup() {
     }
     
     // 3. Wi-Fi Setup
+    wifiStatusStr = "WiFi: Connecting...";
+    updateDisplay();
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     
     // 4. BLE Beacon Setup
@@ -392,6 +478,9 @@ void setup() {
     
     // Cleanup old history entries on startup (older than 7 days = 604800 seconds)
     cleanupOldHistory(604800);
+    
+    statusLine = "Running";
+    updateDisplay();
 }
 
 // ---------------------------
@@ -399,8 +488,27 @@ void setup() {
 // ---------------------------
 void loop() {
     // Check WiFi Status periodically and reconnect if needed
-    if (WiFi.status() != WL_CONNECTED) {
-        // Serial.println("WiFi Disconnected"); 
+    static unsigned long lastLedUpdate = 0;
+    static unsigned long lastDisplayUpdate = 0;
+    bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+    
+    // Update WiFi Status String
+    if (wifiConnected) {
+        wifiStatusStr = "WiFi: " + WiFi.localIP().toString();
+        digitalWrite(LED_BUILTIN, LOW);
+    } else {
+        wifiStatusStr = "WiFi: Disconnected";
+        // Blink LED to indicate WiFi issue
+        if (millis() - lastLedUpdate > 500) {
+             lastLedUpdate = millis();
+             digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+        }
+    }
+    
+    // Periodically update display even if no packets (to show WiFi status changes)
+    if (millis() - lastDisplayUpdate > 2000) {
+        lastDisplayUpdate = millis();
+        updateDisplay();
     }
 
     // Check for LoRa Packet (Non-blocking)
@@ -412,16 +520,39 @@ void loop() {
 
         if (state == RADIOLIB_ERR_NONE) {
             // Packet received
+            digitalWrite(LED_BUILTIN, HIGH);
+            delay(10);
+            digitalWrite(LED_BUILTIN, LOW);
+
             int len = radio.getPacketLength();
+            lastRssi = (int)radio.getRSSI();
+            
             if (len < sizeof(PacketHeader)) {
                 Serial.println("Packet too short");
+                statusLine = "Err: Short Pkt";
             } else {
                 PacketHeader* header = (PacketHeader*)buffer;
+                lastPacketInfo = String(header->deviceID, HEX);
+                statusLine = "Rx: " + String(header->packetType);
+                
                 Serial.printf("Rx Packet: DevID=%X, MsgID=%d, Hops=%d, Type=%d\n", 
                               header->deviceID, header->messageID, header->hopCount, header->packetType);
 
                 if (!isMessageSeen(header->deviceID, header->messageID)) {
                     addToCache(header->deviceID, header->messageID);
+
+                    // Send ACK for valid packets (Location or Heartbeat)
+                    if (header->packetType == PACKET_TYPE_LOCATION || header->packetType == PACKET_TYPE_HEARTBEAT) {
+                        // Delay slightly to let tracker switch to RX? 
+                        // The tracker switches immediately after TX, so we should be fine.
+                        // But we are in "readData" here, which might be slightly after reception.
+                        // We should probably send ACK before long upload process?
+                        // Or after? If upload fails, do we ACK?
+                        // Usually ACK means "RF received", not "Cloud uploaded".
+                        // So we ACK here.
+                        delay(50); // Small turnaround delay
+                        sendAck(header->deviceID, header->messageID);
+                    }
 
                     if (header->packetType == PACKET_TYPE_LOCATION) {
                         if (len >= sizeof(PacketHeader) + sizeof(LocationPayload)) {
@@ -447,6 +578,9 @@ void loop() {
                 }
             }
         }
+        
+        // Update display immediately on packet
+        updateDisplay();
         
         // Resume Listening
         radio.startReceive();

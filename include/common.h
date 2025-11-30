@@ -6,6 +6,7 @@
 // Packet Types
 #define PACKET_TYPE_LOCATION      0x01
 #define PACKET_TYPE_HEARTBEAT     0x02
+#define PACKET_TYPE_ACK           0x03
 #define PACKET_TYPE_CMD_REPORT    0x10
 #define PACKET_TYPE_CONFIG_UPDATE 0x20
 
@@ -24,6 +25,12 @@ struct LocationPayload {
     uint8_t battery;       // Battery percentage or voltage encoding
 } __attribute__((packed));
 
+// Payload for Acknowledgement
+struct AckPayload {
+    uint32_t ackDeviceID;  // The deviceID being acknowledged
+    uint8_t  ackMessageID; // The messageID being acknowledged
+} __attribute__((packed));
+
 // Payload for Configuration (if needed)
 struct ConfigPayload {
     uint8_t count;
@@ -37,7 +44,8 @@ struct MeshPacket {
     PacketHeader header;
     union {
         LocationPayload location;
-        ConfigPayload config;
+        AckPayload      ack;
+        ConfigPayload   config;
         // uint8_t raw[max_payload_size];
     } payload;
 } __attribute__((packed));

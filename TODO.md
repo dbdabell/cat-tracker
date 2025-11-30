@@ -6,25 +6,26 @@ This document tracks technical debt, required implementations, and future improv
 
 ### Power Management
 - [x] **Battery Monitoring:** Implemented `readBatteryLevel()` using `PIN_VBAT` (if available).
-- [ ] **Implement Deep Sleep:** `delay(15000)` calls `yield()` which enters System ON sleep (low power). 
-    - *Improvement:* Verify if `sd_power_system_off` (Deep Sleep) is feasible with RTC wake-up for even lower consumption (<1uA vs ~2uA).
+- [x] **Implement Deep Sleep:** `delay(15000)` calls `yield()` which enters System ON sleep. Radio and GPS are explicitly put to sleep.
+    - *Decision:* `sd_power_system_off` (System OFF) disables RTC. Sticking to System ON.
+- [x] **GPS Power Save:** Implemented `UBX-RXM-PMREQ` (Backup Mode) for BN-180 (u-blox).
 
 ### Radio & Communications
-- [ ] **Refactor RX Logic:** Cleanup `listenForDownlink` in Tracker. It currently uses a blocking delay/loop.
-- [ ] **Handle CMD_REPORT:** Ensure that receiving `CMD_REPORT` actually triggers a fresh GPS read.
+- [x] **Refactor RX Logic:** Cleanup `listenForDownlink` in Tracker. It now returns status (ACK/CMD) and uses `millis()` properly.
+- [x] **Handle CMD_REPORT:** Receiving `CMD_REPORT` now triggers `performLocationUpdate()` immediately in the tracker loop.
 
 ## Gateway (Device B)
 
 ### Configuration & Credentials
 - [x] **Externalize Secrets:** Credentials moved to `src/gateway/secrets.h`.
-- [ ] **Config Parsing:** Implement proper parsing for `CONFIG_UUID` downlink.
+- [x] **Config Parsing:** Implement proper parsing for `CONFIG_UUID` downlink.
 
 ### Radio & Concurrency
 - [x] **Non-blocking Loop:** Implemented interrupt-based `packetReceived` flag to allow `loop()` to run without blocking on `radio.receive()`.
 
 ### Mesh Logic
-- [ ] **Deduplication Cache:** Review `CACHE_SIZE`.
+- [x] **Deduplication Cache:** Review `CACHE_SIZE`. Increased to 64.
 
 ## General / Common
-- [ ] **Testing:** Verify `PacketHeader` struct packing.
-- [ ] **Error Handling:** Add LED status indicators.
+- [x] **Testing:** Verify `PacketHeader` struct packing.
+- [x] **Error Handling:** Add LED status indicators.

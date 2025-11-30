@@ -29,6 +29,11 @@ TinyGPSPlus gps;
 
 uint32_t myDeviceID = 0;
 uint8_t nextMessageID = 0;
+uint8_t lastSentMessageID = 0; // Track for ACK
+bool isGpsAwake = true; // Track GPS power state
+int8_t currentTxPower = 22; // Default to max power (22 dBm)
+int missedDownlinks = 0; // Track consecutive missed downlinks
+int consecutiveGpsFailures = 0; // Track GPS fix failures
 
 // BLE Objects
 // Target Gateway UUID to look for
@@ -90,76 +95,161 @@ void saveConfig(uint8_t* newUUID) {
 // Forward declaration
 void sendPacket(uint8_t packetType, void* payloadData, size_t payloadSize);
 
+// GPS Power Management (u-blox / BN-180)
+void sleepGPS() {
+    if (!isGpsAwake) return;
+    // ... (existing code)
+    // UBX-RXM-PMREQ to enter Backup Mode (Software Backup)
+    uint8_t sleepCmd[] = {0xB5, 0x62, 0x02, 0x41, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x4D, 0x3B};
+    Serial1.write(sleepCmd, sizeof(sleepCmd));
+    isGpsAwake = false;
+    Serial.println(F("GPS sleeping..."));
+}
+
+void wakeGPS() {
+    if (isGpsAwake) return;
+    // Send dummy bytes to wake up u-blox from sleep
+    Serial1.write(0xFF);
+    Serial1.write(0xFF);
+    Serial1.flush();
+    delay(100); // Allow wake-up time
+    isGpsAwake = true;
+    Serial.println(F("GPS waking..."));
+}
+
+void performLocationUpdate() {
+    wakeGPS(); // Wake up GPS for reading
+
+    unsigned long start = millis();
+    bool gpsFix = false;
+    
+    // Dynamic Timeout Logic:
+    // Standard timeout: 5 seconds (sufficient for hot start)
+    // Cold Start / Trouble timeout: 45 seconds (tried only after multiple failures)
+    unsigned long timeout = 5000; 
+
+    if (consecutiveGpsFailures >= 3) {
+        Serial.println(F("Multiple GPS failures. Attempting extended Cold Start window..."));
+        timeout = 45000; // Give it 45 seconds to find satellites
+    }
+
+    // Try to get fix
+    while (millis() - start < timeout) { 
+            while (Serial1.available() > 0) {
+            if (gps.encode(Serial1.read())) {
+                if (gps.location.isValid()) {
+                    gpsFix = true;
+                    // We got a fix! We can break early to save power.
+                    // But we might want to wait a bit for HDOP to improve?
+                    // For now, let's take the first valid fix to be quick.
+                    goto fix_found; 
+                }
+            }
+        }
+    }
+    
+    fix_found:
+    if (gpsFix) {
+        consecutiveGpsFailures = 0; // Reset counter on success
+            LocationPayload loc;
+        loc.lat = gps.location.lat();
+        loc.lon = gps.location.lng();
+        loc.battery = readBatteryLevel();
+        sendPacket(PACKET_TYPE_LOCATION, &loc, sizeof(LocationPayload));
+    } else {
+        consecutiveGpsFailures++;
+        Serial.print(F("GPS No Fix. Failure count: "));
+        Serial.println(consecutiveGpsFailures);
+            sendPacket(PACKET_TYPE_HEARTBEAT, nullptr, 0);
+    }
+
+    // Put GPS back to sleep
+    sleepGPS();
+}
+
+enum RxStatus {
+    RX_TIMEOUT,
+    RX_ACK,
+    RX_CMD_REPORT,
+    RX_ERROR
+};
+
 // RX Window Function
-void listenForDownlink(unsigned long timeoutMs) {
+RxStatus listenForDownlink(unsigned long timeoutMs) {
     unsigned long start = millis();
     Serial.println("Listening for downlink...");
     
+    bool receivedAny = false;
+    RxStatus result = RX_TIMEOUT;
+
     // Put radio in RX mode
     radio.startReceive();
     
     while (millis() - start < timeoutMs) {
-        // Poll for packet
-        // Note: checking if packet received without blocking the whole duration if possible,
-        // but simple blocking read with timeout is easier if RadioLib supports it?
-        // Actually, startReceive is non-blocking. We need to check irq flags.
-        // Or simpler: radio.receive(buffer, len) blocks until timeout if configured?
-        // RadioLib `receive` is blocking. Let's use `readData` if we used startReceive?
-        // Or just use blocking receive with a timeout matching our window.
-        // But RadioLib blocking receive doesn't always take timeout arg in all methods (depends on version).
-        
-        // Simpler approach for this scaffold: Check available()
-        // But available() only works if we called startReceive().
-        // For SX1262, check radio.getPacketLength(false) ??
-        // Let's just check the DIO1 pin or busy?
-        // For simplicity:
-        
         uint8_t buffer[256];
-        int state = radio.readData(buffer, sizeof(buffer)); // Only works if we called startReceive and IRQ fired?
+        int state = radio.readData(buffer, sizeof(buffer)); 
         
         if (state == RADIOLIB_ERR_NONE) {
             Serial.println("Downlink received!");
+            receivedAny = true;
+            missedDownlinks = 0; // Reset counter
             PacketHeader* header = (PacketHeader*)buffer;
-            
-            if (header->packetType == PACKET_TYPE_CMD_REPORT) {
+            int len = radio.getPacketLength(); // Get length of received packet
+
+            if (header->packetType == PACKET_TYPE_ACK) {
+                if (len >= sizeof(PacketHeader) + sizeof(AckPayload)) {
+                    AckPayload* ack = (AckPayload*)(buffer + sizeof(PacketHeader));
+                    if (ack->ackDeviceID == myDeviceID && ack->ackMessageID == lastSentMessageID) {
+                        Serial.println("ACK received for last packet!");
+                        result = RX_ACK;
+                        return RX_ACK; // Return immediately on ACK
+                    }
+                }
+            }
+            else if (header->packetType == PACKET_TYPE_CMD_REPORT) {
                 Serial.println("CMD: REPORT_NOW received.");
-                // Trigger Location Send immediately
-                // We are in listen window, so we can break and just let loop run?
-                // Or better: handle it here.
-                // But if we handle it here, we might recurse.
-                // Let's set a flag to force report next loop?
-                // Or just send it now.
-                // Re-sending location now:
-                // We need GPS though.
-                // If we are in this window, we might have just sent location.
-                // If we didn't, we might not have fresh GPS.
-                // Let's just break and set a "forceReport" flag?
-                // Actually user said: "Once tracker receives request, it will check location and send response."
-                // So we should break, acquire GPS, and send.
-                return; // Caller will handle logic if we return status?
+                result = RX_CMD_REPORT;
+                return RX_CMD_REPORT; // Return immediately to handle report
             } 
             else if (header->packetType == PACKET_TYPE_CONFIG_UPDATE) {
                 Serial.println("CMD: CONFIG_UPDATE received.");
-                int len = radio.getPacketLength();
                 if (len >= sizeof(PacketHeader) + sizeof(ConfigPayload)) {
                     ConfigPayload* cfg = (ConfigPayload*)(buffer + sizeof(PacketHeader));
-                    // Update UUID
-                    // Assuming count > 0 and using first UUID
                     saveConfig(cfg->uuids[0]);
                 }
             }
             
-            // Go back to RX for remainder of window?
+            // Go back to RX for remainder of window (if not returned)
             radio.startReceive();
+            
+            // Adaptive Power Logic
+            if (currentTxPower > 10) {
+                 currentTxPower -= 2; 
+                 Serial.print(F("Link good. Reducing TX power to "));
+                 Serial.println(currentTxPower);
+            }
         }
         delay(10);
     }
+
+    if (!receivedAny) {
+        missedDownlinks++;
+        if (missedDownlinks > 5 && currentTxPower < 22) {
+             currentTxPower += 2; 
+             Serial.print(F("Missed downlinks. Increasing TX power to "));
+             Serial.println(currentTxPower);
+             missedDownlinks = 0; 
+        }
+    }
+    
+    return result;
 }
 
 void sendPacket(uint8_t packetType, void* payloadData, size_t payloadSize) {
     PacketHeader header;
     header.deviceID = myDeviceID;
     header.messageID = nextMessageID++;
+    lastSentMessageID = header.messageID;
     header.hopCount = 3; 
     header.packetType = packetType;
 
@@ -171,13 +261,30 @@ void sendPacket(uint8_t packetType, void* payloadData, size_t payloadSize) {
         memcpy(buffer + sizeof(PacketHeader), payloadData, payloadSize);
     }
 
-    Serial.print("Transmitting Packet Type 0x");
+    Serial.print(F("Transmitting Packet Type 0x"));
     Serial.println(packetType, HEX);
     
+    // Set power before transmitting
+    radio.setOutputPower(currentTxPower);
+
     int state = radio.transmit(buffer, totalSize);
     
     if (state == RADIOLIB_ERR_NONE) {
         Serial.println(F("Transmission success!"));
+        // Adaptive Power Logic:
+        // If successful, we might lower power? 
+        // No, successful transmit doesn't mean successful reception by gateway.
+        // We need an ACK to lower power. 
+        // Without ACK, we should probably stay high or increase if we were low.
+        // For this simple unacknowledged protocol, we stick to high power or a fixed setting.
+        // But user asked for "step up power only if needed".
+        // This implies we start low and increase if we fail? 
+        // RadioLib `transmit` only fails if hardware fails, not if link fails.
+        // We need a downlink (ACK) to know if we reached the gateway.
+        
+        // Strategy A (Simple): Always use max power for reliability.
+        // Strategy B (Adaptive): Start at 10dBm. If no Downlink received in X minutes, step up to 22dBm.
+        // Let's implement Strategy B based on 'listenForDownlink' success.
     } else {
         Serial.print(F("Transmission failed, code "));
         Serial.println(state);
@@ -224,6 +331,7 @@ void setup() {
     int state = radio.begin(915.0, 125.0, 9, 7, 0x12, 22);
     if (state == RADIOLIB_ERR_NONE) {
         Serial.println(F("success!"));
+        radio.setOutputPower(currentTxPower); // Set initial power
     } else {
         Serial.print(F("failed, code "));
         Serial.println(state);
@@ -254,44 +362,41 @@ void loop() {
     delay(2000);                // Wait 2 seconds for callback to fire
     Bluefruit.Scanner.stop();   // Stop scanning
     
+    RxStatus rxState = RX_TIMEOUT;
+
     if (gatewayFound) {
         Serial.println(F("Gateway BLE Found! Home Mode."));
+        // Ensure GPS is off to save power
+        sleepGPS();
+
         // Skip GPS
         sendPacket(PACKET_TYPE_HEARTBEAT, nullptr, 0);
         
         // Listen for downlink (e.g. Config update)
-        listenForDownlink(2000);
+        rxState = listenForDownlink(2000);
         
         gatewayFound = false; // Reset for next loop
     } else {
         Serial.println(F("Gateway not found. Roaming Mode."));
         
-        // 2. Poll GPS
-        unsigned long start = millis();
-        bool gpsFix = false;
-        while (millis() - start < 2000) { 
-             while (Serial1.available() > 0) {
-                if (gps.encode(Serial1.read())) {
-                    if (gps.location.isValid()) gpsFix = true;
-                }
-            }
-        }
-        
-        if (gpsFix) {
-             LocationPayload loc;
-            loc.lat = gps.location.lat();
-            loc.lon = gps.location.lng();
-            loc.battery = readBatteryLevel();
-            sendPacket(PACKET_TYPE_LOCATION, &loc, sizeof(LocationPayload));
-        } else {
-             Serial.println(F("GPS No Fix, sending heartbeat"));
-             sendPacket(PACKET_TYPE_HEARTBEAT, nullptr, 0);
-        }
+        performLocationUpdate();
 
         // Listen for downlink (e.g. REPORT_NOW or Config)
-        listenForDownlink(2000); 
+        rxState = listenForDownlink(2000); 
+    }
+
+    // Handle CMD_REPORT if received
+    if (rxState == RX_CMD_REPORT) {
+        Serial.println(F("Executing CMD_REPORT..."));
+        performLocationUpdate();
+        // Optional: Listen again for ACK?
+        // listenForDownlink(1000); 
     }
 
     // Sleep or Wait
+    // Put Radio to sleep to save power
+    radio.sleep();
+    
+    // Low power wait (System ON sleep)
     delay(15000); 
 }

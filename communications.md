@@ -43,6 +43,7 @@ Every packet begins with a standard header:
 | :--- | :--- | :--- | :--- |
 | `0x01` | **LOCATION** | GPS coordinates and battery status. | `lat` (float), `lon` (float), `battery` (uint8_t) |
 | `0x02` | **HEARTBEAT** | Status update when "Home" or no GPS fix. | None (Header only) |
+| `0x03` | **ACK** | Acknowledgment of receipt. | `ackDeviceID` (uint32_t), `ackMessageID` (uint8_t) |
 | `0x10` | **CMD_REPORT** | Command from Gateway to Tracker to force update. | None |
 | `0x20` | **CONFIG_UPDATE** | Update configuration (e.g., Home Beacon UUIDs). | `count` (uint8_t), `uuids` (16-byte arrays) |
 
@@ -62,6 +63,9 @@ The tracker initiates communication based on its state:
     *   **Action:** Tracker activates GPS.
     *   **Message:** Sends `LOCATION` packet upon GPS fix.
     *   **Fallback:** Sends `HEARTBEAT` if no GPS fix is available after timeout.
+
+**Acknowledgment:**
+Upon successfully receiving a `LOCATION` or `HEARTBEAT` packet, the Gateway broadcasts an `ACK` packet targeting the sender's `deviceID` and `messageID`. The Tracker listens for this ACK to confirm delivery and adapt its transmit power.
 
 ### 2. Mesh Networking (Repeater Function)
 Gateways act as intelligent repeaters to extend the network:
