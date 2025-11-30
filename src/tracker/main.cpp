@@ -6,6 +6,8 @@
 #include <bluefruit.h> // Header for nRF52 Bluefruit
 #include "common.h"
 
+using namespace Adafruit_LittleFS_Namespace;
+
 // ---------------------------
 // Hardware Pin Definitions
 // ---------------------------
@@ -63,7 +65,7 @@ uint8_t readBatteryLevel() {
 }
 
 void loadConfig() {
-    File file = InternalFS.open(CONFIG_FILENAME, FILE_READ);
+    File file = InternalFS.open(CONFIG_FILENAME, FILE_O_READ);
     if (file) {
         if (file.read(targetUUID, 16) == 16) {
             Serial.println("Config loaded from flash.");
@@ -76,7 +78,7 @@ void loadConfig() {
 
 void saveConfig(uint8_t* newUUID) {
     InternalFS.remove(CONFIG_FILENAME);
-    File file = InternalFS.open(CONFIG_FILENAME, FILE_WRITE);
+    File file = InternalFS.open(CONFIG_FILENAME, FILE_O_WRITE);
     if (file) {
         file.write(newUUID, 16);
         file.close();
@@ -191,7 +193,7 @@ volatile bool gatewayFound = false;
 
 void scan_callback(ble_gap_evt_adv_report_t* report) {
     // Check for specific UUID
-    if (Bluefruit.Scanner.checkReportForUuid(report, targetUUID, sizeof(targetUUID))) {
+    if (Bluefruit.Scanner.checkReportForUuid(report, BLEUuid(targetUUID))) {
         gatewayFound = true;
     }
 }
@@ -234,7 +236,7 @@ void setup() {
     // 5. BLE
     Bluefruit.begin(0, 1); // 0 periph, 1 central
     Bluefruit.setName("CatTracker");
-    Bluefruit.Scanner.setRxPacket(scan_callback);
+    Bluefruit.Scanner.setRxCallback(scan_callback);
     Bluefruit.Scanner.restartOnDisconnect(true);
     Bluefruit.Scanner.setInterval(160, 80); // in unit of 0.625 ms
     Bluefruit.Scanner.useActiveScan(false);

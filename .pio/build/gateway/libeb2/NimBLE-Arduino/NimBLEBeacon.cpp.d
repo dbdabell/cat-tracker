@@ -1,0 +1,12 @@
+.pio/build/gateway/libeb2/NimBLE-Arduino/NimBLEBeacon.cpp.o: \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/NimBLEBeacon.cpp \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/nimconfig.h \
+ /home/dave/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/qio_qspi/include/sdkconfig.h \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/nimconfig_rename.h \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/NimBLEBeacon.h \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/NimBLEUUID.h \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/nimble/nimble/host/include/host/ble_uuid.h \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/NimBLELog.h \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/nimble/porting/nimble/include/syscfg/syscfg.h \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/nimble/esp_port/port/include/esp_nimble_cfg.h \
+ .pio/libdeps/gateway/NimBLE-Arduino/src/nimble/console/console.h

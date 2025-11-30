@@ -61,6 +61,9 @@ bool historyFull = false;   // True when buffer has wrapped around
 // Location History Functions
 // ---------------------------
 
+// Forward declaration
+void saveLocationHistory();
+
 bool initLocationHistory() {
     // Allocate memory for history buffer
     locationHistory = (LocationHistoryEntry*)malloc(HISTORY_MAX_SIZE);
