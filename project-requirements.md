@@ -80,21 +80,29 @@ RX Window: After transmission (or periodic wake-up), listen for Downlink Packets
 
 Global Cache: Maintain a RecentMessages list (last 20 messageIDs) to prevent broadcast storms.
 
+Location History: Maintain a persistent rolling history of location data in flash memory.
+
+- Storage: Up to 1000 location entries stored in LittleFS filesystem
+- Persistence: History is automatically saved to flash every 10 entries to reduce wear
+- Circular Buffer: When capacity is reached, oldest entries are automatically overwritten
+- Cleanup: On startup, entries older than 7 days are automatically removed
+- Memory: Each entry contains deviceID, latitude, longitude, battery level, and timestamp
+- Storage Size: Approximately 20KB for full history (1000 entries × 20 bytes)
+
 Packet Handler:
 
 On Receive -> Check RecentMessages. If exists, ignore.
 
 Add messageID to cache.
 
-Check Wi-Fi Status.
+If Location Packet (Type 0x01):
+   - Always save to location history (regardless of WiFi status)
+   - Check Wi-Fi Status.
+   - If Wi-Fi Connected: Upload to Traccar via HTTP.
+   - If Wi-Fi Disconnected: Check hopCount. If > 0, decrement hopCount, wait random delay (50-200ms), retransmit Packet (LoRa TX).
 
-If Wi-Fi Connected: Upload to Traccar via HTTP.
-
-If Wi-Fi Disconnected: * Check hopCount. If > 0, decrement hopCount.
-
-Wait random delay (50-200ms) (Collision Avoidance).
-
-Retransmit Packet (LoRa TX).
+If Other Packet Types:
+   - If Wi-Fi Disconnected: Check hopCount. If > 0, decrement hopCount, wait random delay (50-200ms), retransmit Packet (LoRa TX).
 
 Downlink (Mesh Command):
 
@@ -120,6 +128,8 @@ TinyGPSPlus (GPS).
 Adafruit Bluefruit nRF52 (Tracker BLE).
 
 heltecautomation/Heltec ESP32 Dev-Boards (Gateway).
+
+LittleFS_esp32 (Gateway persistent storage).
 
 6. Deliverables Checklist
 
