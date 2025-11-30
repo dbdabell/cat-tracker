@@ -488,4 +488,9 @@
  /home/dave/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/bt/include/esp32c3/include/esp_bt.h \
  /home/dave/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src/LittleFS.h \
  /home/dave/.platformio/packages/framework-arduinoespressif32/libraries/FS/src/FS.h \
+ .pio/libdeps/gateway/ESP8266\ and\ ESP32\ OLED\ driver\ for\ SSD1306\ displays/src/SSD1306Wire.h \
+ .pio/libdeps/gateway/ESP8266\ and\ ESP32\ OLED\ driver\ for\ SSD1306\ displays/src/OLEDDisplay.h \
+ .pio/libdeps/gateway/ESP8266\ and\ ESP32\ OLED\ driver\ for\ SSD1306\ displays/src/OLEDDisplayFonts.h \
+ /home/dave/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src/Wire.h \
+ /home/dave/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal.h \
  include/common.h src/gateway/secrets.h
