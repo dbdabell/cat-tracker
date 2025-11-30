@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <RadioLib.h>
 #include <NimBLEDevice.h>
+#include <LittleFS.h>
 #include "common.h"
 #include "secrets.h"
 
@@ -37,6 +38,200 @@ struct CacheEntry {
 CacheEntry recentMessages[CACHE_SIZE];
 int cacheHead = 0;
 uint8_t nextGatewayMessageID = 0; // For gateway generated packets
+
+// Location History for persistent storage
+struct LocationHistoryEntry {
+    uint32_t deviceID;
+    float lat;
+    float lon;
+    uint8_t battery;
+    uint32_t timestamp;  // Unix timestamp (seconds since epoch)
+} __attribute__((packed));
+
+#define HISTORY_MAX_ENTRIES 1000  // Maximum number of location entries to store
+#define HISTORY_FILENAME "/location_history.dat"
+#define HISTORY_MAX_SIZE (HISTORY_MAX_ENTRIES * sizeof(LocationHistoryEntry))
+
+LocationHistoryEntry* locationHistory = nullptr;
+uint16_t historyCount = 0;
+uint16_t historyHead = 0;  // Circular buffer head pointer
+bool historyFull = false;   // True when buffer has wrapped around
+
+// ---------------------------
+// Location History Functions
+// ---------------------------
+
+bool initLocationHistory() {
+    // Allocate memory for history buffer
+    locationHistory = (LocationHistoryEntry*)malloc(HISTORY_MAX_SIZE);
+    if (!locationHistory) {
+        Serial.println("ERROR: Failed to allocate memory for location history!");
+        return false;
+    }
+    
+    // Initialize LittleFS
+    if (!LittleFS.begin(true)) {  // true = format if mount fails
+        Serial.println("ERROR: LittleFS mount failed!");
+        return false;
+    }
+    
+    // Load existing history from flash
+    File file = LittleFS.open(HISTORY_FILENAME, "r");
+    if (file) {
+        size_t fileSize = file.size();
+        size_t entriesRead = fileSize / sizeof(LocationHistoryEntry);
+        
+        if (entriesRead > 0 && entriesRead <= HISTORY_MAX_ENTRIES) {
+            // Read all entries sequentially (they're saved in chronological order)
+            size_t bytesRead = file.read((uint8_t*)locationHistory, entriesRead * sizeof(LocationHistoryEntry));
+            historyCount = bytesRead / sizeof(LocationHistoryEntry);
+            
+            if (historyCount >= HISTORY_MAX_ENTRIES) {
+                // Buffer was full - next write goes to position 0 (oldest)
+                historyHead = 0;
+                historyFull = true;
+            } else {
+                // Buffer wasn't full - next write goes after last entry
+                historyHead = historyCount;
+                historyFull = false;
+            }
+            
+            Serial.printf("Loaded %d location history entries from flash\n", historyCount);
+        } else {
+            Serial.println("History file size invalid, starting fresh");
+            historyCount = 0;
+            historyHead = 0;
+            historyFull = false;
+        }
+        file.close();
+    } else {
+        Serial.println("No existing history file, starting fresh");
+        historyCount = 0;
+        historyHead = 0;
+        historyFull = false;
+    }
+    
+    return true;
+}
+
+void addLocationToHistory(uint32_t deviceID, float lat, float lon, uint8_t battery) {
+    if (!locationHistory) return;
+    
+    // Get current time (approximate - ESP32 doesn't have RTC, using millis offset)
+    // In production, you'd sync with NTP or GPS time
+    uint32_t currentTime = (uint32_t)(millis() / 1000);  // Approximate seconds
+    
+    // Add entry at head position
+    locationHistory[historyHead].deviceID = deviceID;
+    locationHistory[historyHead].lat = lat;
+    locationHistory[historyHead].lon = lon;
+    locationHistory[historyHead].battery = battery;
+    locationHistory[historyHead].timestamp = currentTime;
+    
+    // Update circular buffer
+    historyHead = (historyHead + 1) % HISTORY_MAX_ENTRIES;
+    
+    if (!historyFull) {
+        historyCount++;
+        if (historyCount >= HISTORY_MAX_ENTRIES) {
+            historyFull = true;
+        }
+    }
+    // If historyFull is true, oldest entries are automatically overwritten
+    
+    // Periodically save to flash (every 10 entries to reduce wear)
+    static uint16_t saveCounter = 0;
+    saveCounter++;
+    if (saveCounter >= 10) {
+        saveCounter = 0;
+        saveLocationHistory();
+    }
+}
+
+void saveLocationHistory() {
+    if (!locationHistory || historyCount == 0) return;
+    
+    File file = LittleFS.open(HISTORY_FILENAME, "w");
+    if (!file) {
+        Serial.println("ERROR: Failed to open history file for writing!");
+        return;
+    }
+    
+    if (historyFull) {
+        // Buffer has wrapped - historyHead points to oldest entry
+        // Write in chronological order: oldest (at historyHead) to newest (at historyHead-1)
+        size_t part1Size = (HISTORY_MAX_ENTRIES - historyHead) * sizeof(LocationHistoryEntry);
+        size_t part2Size = historyHead * sizeof(LocationHistoryEntry);
+        
+        // Write part 1: from historyHead (oldest) to end of buffer
+        if (part1Size > 0) {
+            file.write((uint8_t*)(locationHistory + historyHead), part1Size);
+        }
+        // Write part 2: from start to historyHead-1 (newest entries)
+        if (part2Size > 0) {
+            file.write((uint8_t*)locationHistory, part2Size);
+        }
+    } else {
+        // Buffer hasn't wrapped - write sequentially from start (oldest to newest)
+        size_t writeSize = historyCount * sizeof(LocationHistoryEntry);
+        file.write((uint8_t*)locationHistory, writeSize);
+    }
+    
+    file.close();
+    Serial.printf("Saved %d location history entries to flash\n", historyCount);
+}
+
+void cleanupOldHistory(uint32_t maxAgeSeconds) {
+    if (!locationHistory || historyCount == 0) return;
+    
+    uint32_t currentTime = (uint32_t)(millis() / 1000);
+    uint16_t removed = 0;
+    uint16_t newCount = 0;
+    
+    if (historyFull) {
+        // For wrapped buffer, we need to check all entries
+        // This is complex, so we'll just save and let natural rotation handle it
+        // For now, we'll implement a simpler approach: clear if too old
+        bool needsCleanup = false;
+        for (uint16_t i = 0; i < HISTORY_MAX_ENTRIES; i++) {
+            uint16_t idx = (historyHead + i) % HISTORY_MAX_ENTRIES;
+            if (currentTime - locationHistory[idx].timestamp > maxAgeSeconds) {
+                needsCleanup = true;
+                break;
+            }
+        }
+        
+        if (needsCleanup) {
+            // Clear all and start fresh (simpler than complex rotation)
+            historyCount = 0;
+            historyHead = 0;
+            historyFull = false;
+            Serial.println("History too old, cleared all entries");
+            saveLocationHistory();
+        }
+    } else {
+        // Linear buffer - remove old entries from start
+        uint16_t validStart = 0;
+        for (uint16_t i = 0; i < historyCount; i++) {
+            if (currentTime - locationHistory[i].timestamp <= maxAgeSeconds) {
+                validStart = i;
+                break;
+            }
+        }
+        
+        if (validStart > 0) {
+            // Shift remaining entries
+            for (uint16_t i = validStart; i < historyCount; i++) {
+                locationHistory[i - validStart] = locationHistory[i];
+            }
+            historyCount -= validStart;
+            historyHead = historyCount;
+            removed = validStart;
+            Serial.printf("Removed %d old history entries\n", removed);
+            saveLocationHistory();
+        }
+    }
+}
 
 // ---------------------------
 // Helper Functions
@@ -164,10 +359,15 @@ void setup() {
         while (true);
     }
 
-    // 2. Wi-Fi Setup
+    // 2. Initialize Location History
+    if (!initLocationHistory()) {
+        Serial.println("WARNING: Location history initialization failed!");
+    }
+    
+    // 3. Wi-Fi Setup
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     
-    // 3. BLE Beacon Setup
+    // 4. BLE Beacon Setup
     NimBLEDevice::init("GatewayBeacon");
     NimBLEServer* pServer = NimBLEDevice::createServer();
     NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
@@ -181,11 +381,14 @@ void setup() {
     pAdvertising->start();
     Serial.println("BLE Beacon Advertising Started");
 
-    // 4. Radio Interrupt Setup
+    // 5. Radio Interrupt Setup
     radio.setDio1Action(setFlag);
 
     // Start Radio Receive
     radio.startReceive();
+    
+    // Cleanup old history entries on startup (older than 7 days = 604800 seconds)
+    cleanupOldHistory(604800);
 }
 
 // ---------------------------
@@ -220,6 +423,10 @@ void loop() {
                     if (header->packetType == PACKET_TYPE_LOCATION) {
                         if (len >= sizeof(PacketHeader) + sizeof(LocationPayload)) {
                             LocationPayload* payload = (LocationPayload*)(buffer + sizeof(PacketHeader));
+                            
+                            // Always save to history, regardless of WiFi status
+                            addLocationToHistory(header->deviceID, payload->lat, payload->lon, payload->battery);
+                            
                             if (WiFi.status() == WL_CONNECTED) {
                                 uploadToTraccar(header, payload);
                             } else {
