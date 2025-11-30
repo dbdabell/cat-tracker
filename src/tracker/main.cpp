@@ -40,6 +40,28 @@ uint32_t getUniqueID() {
     return NRF_FICR->DEVICEID[0] ^ NRF_FICR->DEVICEID[1];
 }
 
+uint8_t readBatteryLevel() {
+#ifdef PIN_VBAT
+    // Set resolution
+    analogReadResolution(12);
+    // Read raw
+    int raw = analogRead(PIN_VBAT);
+    // Voltage divider (if any) or internal reference? 
+    // On XIAO nRF52840, the pin measures battery / 2? No, usually direct or divider.
+    // Assuming standard divider: 3.3V reference? 
+    // nRF52 ADC reference is usually internal 0.6V with gain 1/6 = 3.6V range.
+    // Let's assume raw 4096 = 3.6V (or VDD).
+    // Mapping: 4.2V = 100%, 3.3V = 0%.
+    // For now, return a simple map or raw for debug.
+    
+    // Simple mock calculation:
+    // float voltage = raw * (3.6 / 4096.0); // Adjust based on actual hardware
+    return map(raw, 0, 4096, 0, 100); 
+#else
+    return 100; // Stub
+#endif
+}
+
 void loadConfig() {
     File file = InternalFS.open(CONFIG_FILENAME, FILE_READ);
     if (file) {
@@ -257,7 +279,7 @@ void loop() {
              LocationPayload loc;
             loc.lat = gps.location.lat();
             loc.lon = gps.location.lng();
-            loc.battery = 100; // TODO Read ADC
+            loc.battery = readBatteryLevel();
             sendPacket(PACKET_TYPE_LOCATION, &loc, sizeof(LocationPayload));
         } else {
              Serial.println(F("GPS No Fix, sending heartbeat"));

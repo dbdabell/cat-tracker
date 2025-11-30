@@ -4,6 +4,7 @@
 #include <RadioLib.h>
 #include <NimBLEDevice.h>
 #include "common.h"
+#include "secrets.h"
 
 // ---------------------------
 // Hardware Pin Definitions
@@ -15,19 +16,16 @@
 #define LORA_BUSY   13
 
 // ---------------------------
-// Configuration
-// ---------------------------
-const char* WIFI_SSID = "YOUR_SSID";
-const char* WIFI_PASS = "YOUR_PASSWORD";
-const char* TRACCAR_URL = "http://your-traccar-server:5055"; // Traccar OsmAnd protocol port
-// Beacon UUID (Standard iBeacon format or custom)
-// Example: 11223344-5566-7788-99AA-BBCCDDEEFF00
-const char* BEACON_UUID = "11223344-5566-7788-99AA-BBCCDDEEFF00";
-
-// ---------------------------
 // Globals & Objects
 // ---------------------------
 SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
+
+// Interrupt Flag
+volatile bool packetReceived = false;
+
+void setFlag() {
+    packetReceived = true;
+}
 
 // Message Cache to prevent broadcast storms
 struct CacheEntry {
@@ -183,6 +181,9 @@ void setup() {
     pAdvertising->start();
     Serial.println("BLE Beacon Advertising Started");
 
+    // 4. Radio Interrupt Setup
+    radio.setDio1Action(setFlag);
+
     // Start Radio Receive
     radio.startReceive();
 }
@@ -196,72 +197,48 @@ void loop() {
         // Serial.println("WiFi Disconnected"); 
     }
 
-    // Check for LoRa Packet
-    // Using startReceive() (Interrupt/Non-blocking) is better but requires ISR
-    // Since we didn't set up ISR, we use radio.readData() pattern if we polled?
-    // Actually, radio.receive(buffer) is blocking.
-    // If we want to do WiFi checks, we should use receive with timeout or interrupt.
-    
-    // Let's use simple polling with timeout to allow WiFi checks
-    // Or check if packet is available?
-    
-    // Note: RadioLib's `receive` with byte array is blocking. 
-    // `startReceive` puts it in RX mode. We need to check DI0 or `radio.getIrqFlags()` (if SX127x) or `radio.readData` logic.
-    // For SX126x, we can check busy pin or just poll `radio.receive` with short timeout?
-    // `radio.receive(buffer, len)` blocks.
-    
-    // Refactoring to non-blocking pattern is safest:
-    // We didn't set up interrupts, so we can't rely on `startReceive` followed by nothing.
-    // We should use `receive(buffer, len)` with a timeout in the loop so we yield to WiFi.
-    
-    uint8_t buffer[256];
-    // Timeout of 100ms
-    // Note: SX1262 receive() method has different signatures. 
-    // Assuming blocking receive for now, but to handle WiFi, we need short timeout.
-    // Actually, simple way: check IRQ status? 
-    // Let's rely on standard blocking receive with timeout if library supports it.
-    // RadioLib usually blocks until packet or timeout.
-    
-    // But wait, if we block on LoRa, we might miss WiFi events (though ESP32 is dual core/RTOS handles WiFi in background).
-    
-    int state = radio.receive(buffer, sizeof(buffer)); // This blocks indefinitely by default?
-    // radio.receive can take timeout args? check docs. 
-    // Usually it blocks until timeout. Defaults to blocking.
-    // Let's assume standard looping for this scaffold.
-    
-    if (state == RADIOLIB_ERR_NONE) {
-        // Packet received
-        int len = radio.getPacketLength();
-        if (len < sizeof(PacketHeader)) {
-            Serial.println("Packet too short");
-            return;
-        }
+    // Check for LoRa Packet (Non-blocking)
+    if (packetReceived) {
+        packetReceived = false; // Reset flag
+        
+        uint8_t buffer[256];
+        int state = radio.readData(buffer, sizeof(buffer));
 
-        PacketHeader* header = (PacketHeader*)buffer;
-        Serial.printf("Rx Packet: DevID=%X, MsgID=%d, Hops=%d, Type=%d\n", 
-                      header->deviceID, header->messageID, header->hopCount, header->packetType);
+        if (state == RADIOLIB_ERR_NONE) {
+            // Packet received
+            int len = radio.getPacketLength();
+            if (len < sizeof(PacketHeader)) {
+                Serial.println("Packet too short");
+            } else {
+                PacketHeader* header = (PacketHeader*)buffer;
+                Serial.printf("Rx Packet: DevID=%X, MsgID=%d, Hops=%d, Type=%d\n", 
+                              header->deviceID, header->messageID, header->hopCount, header->packetType);
 
-        if (isMessageSeen(header->deviceID, header->messageID)) {
-            Serial.println("Duplicate packet, ignoring.");
-            return;
-        }
-        addToCache(header->deviceID, header->messageID);
+                if (!isMessageSeen(header->deviceID, header->messageID)) {
+                    addToCache(header->deviceID, header->messageID);
 
-        if (header->packetType == PACKET_TYPE_LOCATION) {
-            if (len >= sizeof(PacketHeader) + sizeof(LocationPayload)) {
-                LocationPayload* payload = (LocationPayload*)(buffer + sizeof(PacketHeader));
-                if (WiFi.status() == WL_CONNECTED) {
-                    uploadToTraccar(header, payload);
+                    if (header->packetType == PACKET_TYPE_LOCATION) {
+                        if (len >= sizeof(PacketHeader) + sizeof(LocationPayload)) {
+                            LocationPayload* payload = (LocationPayload*)(buffer + sizeof(PacketHeader));
+                            if (WiFi.status() == WL_CONNECTED) {
+                                uploadToTraccar(header, payload);
+                            } else {
+                                retransmitPacket(buffer, len);
+                            }
+                        }
+                    } else {
+                        // Forward others
+                        if (WiFi.status() != WL_CONNECTED) {
+                            retransmitPacket(buffer, len);
+                        }
+                    }
                 } else {
-                    retransmitPacket(buffer, len);
+                    Serial.println("Duplicate packet, ignoring.");
                 }
             }
-        } else {
-            // Forward others
-            if (WiFi.status() != WL_CONNECTED) {
-                retransmitPacket(buffer, len);
-            }
         }
+        
+        // Resume Listening
+        radio.startReceive();
     }
-    // Else check error codes (Timeout is fine)
 }
