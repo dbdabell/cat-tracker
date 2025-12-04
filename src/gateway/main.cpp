@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <RadioLib.h>
@@ -21,6 +22,11 @@
 #define OLED_SDA    17
 #define OLED_SCL    18
 #define OLED_RST    21
+#define OLED_VEXT   36  // Power control - LOW = ON, HIGH = OFF
+
+// Battery voltage measurement
+#define VBAT_ADC_PIN    1    // ADC pin to read battery voltage
+#define VBAT_CTRL_PIN   37   // Control pin - must be HIGH to enable voltage divider
 
 // ---------------------------
 // Globals & Objects
@@ -33,6 +39,14 @@ String statusLine = "Initializing...";
 String lastPacketInfo = "No Data";
 String wifiStatusStr = "WiFi: Connecting...";
 int lastRssi = 0;
+uint8_t displayPage = 0;  // Track which page to show
+unsigned long lastPageChange = 0;  // Track when to rotate pages
+
+// Last packet details for display
+float lastPacketLat = 0.0;
+float lastPacketLon = 0.0;
+uint32_t lastPacketDeviceID = 0;
+unsigned long lastPacketTime = 0;  // millis() when last packet received
 
 // Interrupt Flag
 volatile bool packetReceived = false;
@@ -253,26 +267,81 @@ void cleanupOldHistory(uint32_t maxAgeSeconds) {
 // Helper Functions
 // ---------------------------
 
+float readBatteryVoltage() {
+    // Heltec V3 battery voltage reading:
+    // - GPIO 37 must be HIGH to enable voltage divider
+    // - GPIO 1 reads the voltage
+    // - Voltage divider factor is 4.9
+    
+    pinMode(VBAT_CTRL_PIN, OUTPUT);
+    digitalWrite(VBAT_CTRL_PIN, HIGH);  // Enable voltage divider
+    delay(10);  // Wait for stabilization
+    
+    analogReadResolution(12);
+    analogSetAttenuation(ADC_11db);
+    int raw = analogRead(VBAT_ADC_PIN);
+    
+    // Convert: raw * (3.3V / 4095) * 4.9 (voltage divider factor)
+    float voltage = (raw / 4095.0) * 3.3 * 4.9;
+    
+    // If voltage is very low, might indicate no battery
+    if (voltage < 2.5) {
+        return 0.0;
+    }
+    
+    return voltage;
+}
+
+// Helper to draw text boldly by drawing it twice with 1px offset
+void drawBoldString(int x, int y, String text) {
+    display.drawString(x, y, text);
+    display.drawString(x+1, y, text);
+}
+
 void updateDisplay() {
     display.clear();
     
-    // Top Bar: WiFi Status
+    // Rotate pages every 4 seconds
+    if (millis() - lastPageChange > 4000) {
+        lastPageChange = millis();
+        displayPage = (displayPage + 1) % 2;  // 2 pages total
+    }
+    
     display.setFont(ArialMT_Plain_10);
     display.setTextAlignment(TEXT_ALIGN_LEFT);
-    display.drawString(0, 0, wifiStatusStr);
+    display.setColor(WHITE);
     
-    // Middle: Last Packet
-    display.drawString(0, 15, "Last Packet:");
-    display.setFont(ArialMT_Plain_16);
-    display.drawString(0, 28, lastPacketInfo);
-    
-    // Bottom: RSSI and Status
-    display.setFont(ArialMT_Plain_10);
-    String rssiStr = "RSSI: " + String(lastRssi) + " dBm";
-    display.drawString(0, 50, rssiStr);
-    
-    display.setTextAlignment(TEXT_ALIGN_RIGHT);
-    display.drawString(128, 50, statusLine);
+    if (displayPage == 0) {
+        // PAGE 1: Current Status
+        float vbat = readBatteryVoltage();
+        String batStr = (vbat > 2.5) ? ("Bat: " + String(vbat, 2) + "V") : "USB Power";
+        
+        display.drawString(0, 0, "=== Gateway ===");
+        display.drawString(0, 12, batStr);
+        display.drawString(0, 24, (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "WiFi: Disconnected"));
+        display.drawString(0, 36, "Dev: " + lastPacketInfo);
+        display.drawString(0, 48, "RSSI: " + String(lastRssi) + " dBm");
+        
+    } else {
+        // PAGE 2: Last Packet Details
+        display.drawString(0, 0, "=== Last Packet ===");
+        
+        if (lastPacketTime > 0) {
+            // Show time since last packet
+            unsigned long elapsed = (millis() - lastPacketTime) / 1000;
+            display.drawString(0, 12, "Age: " + String(elapsed) + "s ago");
+            
+            // Show tracker ID
+            display.drawString(0, 24, "ID: " + String(lastPacketDeviceID, HEX));
+            
+            // Show coordinates
+            display.drawString(0, 36, "Lat: " + String(lastPacketLat, 4));
+            display.drawString(0, 48, "Lon: " + String(lastPacketLon, 4));
+        } else {
+            display.drawString(0, 24, "No packets");
+            display.drawString(0, 36, "received yet");
+        }
+    }
     
     display.display();
 }
@@ -412,16 +481,45 @@ void retransmitPacket(uint8_t* data, size_t len) {
 void setup() {
     Serial.begin(115200);
     
-    // OLED Reset & Init
+    // ENABLE OLED POWER FIRST - This is the key!
+    pinMode(OLED_VEXT, OUTPUT);
+    digitalWrite(OLED_VEXT, LOW);  // LOW = Power ON
+    delay(10);  // Wait for power to stabilize
+    
+    // OLED Reset sequence
     pinMode(OLED_RST, OUTPUT);
     digitalWrite(OLED_RST, LOW);
-    delay(20);
+    delay(50);
     digitalWrite(OLED_RST, HIGH);
+    delay(100);
     
+    // Initialize display
     display.init();
     display.flipScreenVertically();
+    display.setContrast(255);
+    
+    delay(100);
+    
+    // Brightness boost
+    Wire.setClock(700000);
+    delay(10);
+    
+    Wire.beginTransmission(0x3C);
+    Wire.write(0x00);
+    Wire.write(0xD9);
+    Wire.write(0xF1);
+    Wire.endTransmission();
+    delay(10);
+    
+    // Clear and display
+    display.clear();
     display.setFont(ArialMT_Plain_10);
-    display.drawString(0, 0, "Booting Gateway...");
+    display.setTextAlignment(TEXT_ALIGN_CENTER);
+    display.drawString(64, 0, "==============");
+    display.drawString(64, 12, "Cat Tracker");
+    display.drawString(64, 24, "Gateway");
+    display.drawString(64, 36, "Initializing...");
+    display.drawString(64, 48, "==============");
     display.display();
     
     delay(2000);
@@ -558,6 +656,12 @@ void loop() {
                         if (len >= sizeof(PacketHeader) + sizeof(LocationPayload)) {
                             LocationPayload* payload = (LocationPayload*)(buffer + sizeof(PacketHeader));
                             
+                            // Store packet details for display
+                            lastPacketLat = payload->lat;
+                            lastPacketLon = payload->lon;
+                            lastPacketDeviceID = header->deviceID;
+                            lastPacketTime = millis();
+                            
                             // Always save to history, regardless of WiFi status
                             addLocationToHistory(header->deviceID, payload->lat, payload->lon, payload->battery);
                             
@@ -566,7 +670,7 @@ void loop() {
                             } else {
                                 retransmitPacket(buffer, len);
                             }
-                        }
+                        } 
                     } else {
                         // Forward others
                         if (WiFi.status() != WL_CONNECTED) {

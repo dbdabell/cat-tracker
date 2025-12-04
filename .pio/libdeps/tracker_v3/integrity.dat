@@ -1,0 +1,4 @@
+jgromes/RadioLib @ ^7.1.2
+h2zero/NimBLE-Arduino @ ^1.4.1
+mikalhart/TinyGPSPlus @ ^1.1.0
+thingpulse/ESP8266 and ESP32 OLED driver for SSD1306 displays @ ^4.6.1

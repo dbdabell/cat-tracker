@@ -2,8 +2,8 @@
 #define SECRETS_H
 
 // WiFi Credentials
-const char* WIFI_SSID = "YOUR_SSID";
-const char* WIFI_PASS = "YOUR_PASSWORD";
+const char* WIFI_SSID = "hermitage";
+const char* WIFI_PASS = "notyours";
 
 // Traccar Server
 const char* TRACCAR_URL = "http://your-traccar-server:5055"; 
